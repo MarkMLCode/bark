@@ -11,6 +11,7 @@ from scipy.special import softmax
 import torch
 import torch.nn.functional as F
 import tqdm
+import time
 from transformers import BertTokenizer
 from huggingface_hub import hf_hub_download
 
@@ -150,6 +151,14 @@ def _download(from_hf_path, file_name):
     os.makedirs(CACHE_DIR, exist_ok=True)
     hf_hub_download(repo_id=from_hf_path, filename=file_name, local_dir=CACHE_DIR)
 
+class InterruptEvent():
+    interrupt_time = time.time() 
+
+    def interrupt(self):
+        self.interrupt_time = time.time()
+    
+    def get_interrupt_time(self):
+        return self.interrupt_time
 
 class InferenceContext:
     def __init__(self, benchmark=False):
@@ -385,6 +394,8 @@ def generate_text_semantic(
     max_gen_duration_s=None,
     allow_early_stop=True,
     use_kv_caching=False,
+    start_time: float = 0, 
+    interrupt_event: InterruptEvent = None
 ):
     """Generate semantic tokens from text."""
     assert isinstance(text, str)
@@ -451,6 +462,10 @@ def generate_text_semantic(
         tot_generated_duration_s = 0
         kv_cache = None
         for n in range(n_tot_steps):
+            # Leave loop on bark interrupt
+            if interrupt_event is not None and start_time < interrupt_event.get_interrupt_time():
+                return None
+
             if use_kv_caching and kv_cache is not None:
                 x_input = x[:, [-1]]
             else:
@@ -539,7 +554,7 @@ def generate_coarse(
     silent=False,
     max_coarse_history=630,  # min 60 (faster), max 630 (more context)
     sliding_window_len=60,
-    use_kv_caching=False,
+    use_kv_caching=False
 ):
     """Generate coarse audio codes from semantic tokens."""
     assert (
@@ -617,6 +632,10 @@ def generate_coarse(
         n_window_steps = int(np.ceil(n_steps / sliding_window_len))
         n_step = 0
         for _ in tqdm.tqdm(range(n_window_steps), total=n_window_steps, disable=silent):
+            # Leave loop on bark interrupt
+            #if interrupt_event is not None and convo_creation_time < interrupt_event.get_interrupt_time():
+            #    return None
+
             semantic_idx = base_semantic_idx + int(round(n_step / semantic_to_coarse_ratio))
             # pad from right side
             x_in = x_semantic_in[:, np.max([0, semantic_idx - max_semantic_history]) :]
@@ -700,7 +719,7 @@ def generate_fine(
     x_coarse_gen,
     history_prompt=None,
     temp=0.5,
-    silent=True,
+    silent=True
 ):
     """Generate full audio codes from coarse audio codes."""
     assert (
@@ -769,6 +788,10 @@ def generate_fine(
     with _inference_mode():
         in_arr = torch.tensor(in_arr.T).to(device)
         for n in tqdm.tqdm(range(n_loops), disable=silent):
+            # Leave loop on bark interrupt
+            #if interrupt_event is not None and convo_creation_time < interrupt_event.get_interrupt_time():
+            #    return None
+
             start_idx = np.min([n * 512, in_arr.shape[0] - 1024])
             start_fill_idx = np.min([n_history + n * 512, in_arr.shape[0] - 512])
             rel_start_fill_idx = start_fill_idx - start_idx
