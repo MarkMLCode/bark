@@ -36,6 +36,9 @@ else:
 global models
 models = {}
 
+light_models = None
+full_models = None
+
 global models_devices
 models_devices = {}
 
@@ -191,8 +194,8 @@ def _clear_cuda_cache():
         torch.cuda.synchronize()
 
 
-def clean_models(model_key=None):
-    global models
+def clean_models(models, model_key=None):
+    #global models
     model_keys = [model_key] if model_key is not None else list(models.keys())
     for k in model_keys:
         if k in models:
@@ -267,11 +270,11 @@ def _load_codec_model(device):
     return model
 
 
-def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="text"):
+def load_model(models, use_gpu=True, use_small=False, force_reload=False, model_type="text"):
     _load_model_f = funcy.partial(_load_model, model_type=model_type, use_small=use_small)
     if model_type not in ("text", "coarse", "fine"):
         raise NotImplementedError()
-    global models
+    #global models
     global models_devices
     device = _grab_best_device(use_gpu=use_gpu)
     model_key = f"{model_type}"
@@ -280,7 +283,7 @@ def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="te
         device = "cpu"
     if model_key not in models or force_reload:
         ckpt_path = _get_ckpt_path(model_type, use_small=use_small)
-        clean_models(model_key=model_key)
+        clean_models(models, model_key=model_key)
         model = _load_model_f(ckpt_path, device)
         models[model_key] = model
     if model_type == "text":
@@ -290,8 +293,8 @@ def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="te
     return models[model_key]
 
 
-def load_codec_model(use_gpu=True, force_reload=False):
-    global models
+def load_codec_model(models, use_gpu=True, force_reload=False):
+    #global models
     global models_devices
     device = _grab_best_device(use_gpu=use_gpu)
     if device == "mps":
@@ -302,7 +305,7 @@ def load_codec_model(use_gpu=True, force_reload=False):
         models_devices[model_key] = device
         device = "cpu"
     if model_key not in models or force_reload:
-        clean_models(model_key=model_key)
+        clean_models(models, model_key=model_key)
         model = _load_codec_model(device)
         models[model_key] = model
     models[model_key].to(device)
@@ -317,32 +320,55 @@ def preload_models(
     fine_use_gpu=True,
     fine_use_small=False,
     codec_use_gpu=True,
-    force_reload=False,
+    force_reload=False
 ):
+    current_models = {}
+
+    # setup full_models if not light mode, setup light_models otherwise
+    if text_use_small or coarse_use_small or fine_use_small:
+        global light_models
+        light_models = current_models
+        light_models["Name"] = "Light"
+    else:
+        global full_models
+        full_models = current_models 
+        full_models["Name"] = "Full"
+
     """Load all the necessary models for the pipeline."""
     if _grab_best_device() == "cpu" and (
         text_use_gpu or coarse_use_gpu or fine_use_gpu or codec_use_gpu
     ):
         logger.warning("No GPU being used. Careful, inference might be very slow!")
     _ = load_model(
-        model_type="text", use_gpu=text_use_gpu, use_small=text_use_small, force_reload=force_reload
+        current_models, model_type="text", use_gpu=text_use_gpu, use_small=text_use_small, force_reload=force_reload
     )
     _ = load_model(
+        current_models, 
         model_type="coarse",
         use_gpu=coarse_use_gpu,
         use_small=coarse_use_small,
         force_reload=force_reload,
     )
     _ = load_model(
-        model_type="fine", use_gpu=fine_use_gpu, use_small=fine_use_small, force_reload=force_reload
+        current_models, model_type="fine", use_gpu=fine_use_gpu, use_small=fine_use_small, force_reload=force_reload
     )
-    _ = load_codec_model(use_gpu=codec_use_gpu, force_reload=force_reload)
+    _ = load_codec_model(current_models, use_gpu=codec_use_gpu, force_reload=force_reload)
+    
+    # Set default models = last preloaded models
+    global models
+    models = current_models
 
+# Set which models to use (Only does anything if both are set, use default otherwise)
+def select_bark_models(use_light_models = True):
+    global models
+
+    # Only switch if both full and light models exists, otherwise just keep the default
+    if full_models is not None and light_models is not None:
+        models = light_models if use_light_models else full_models
 
 ####
 # Generation Functionality
 ####
-
 
 def _tokenize(tokenizer, text):
     return tokenizer.encode(text, add_special_tokens=False)
@@ -415,6 +441,7 @@ def generate_text_semantic(
         semantic_history = None
     # load models if not yet exist
     global models
+    print(f'Current semantic model : {models["Name"]}')
     global models_devices
     if "text" not in models:
         preload_models()
@@ -605,6 +632,7 @@ def generate_coarse(
         x_coarse_history = np.array([], dtype=np.int32)
     # load models if not yet exist
     global models
+    print(f'Current coarse model : {models["Name"]}')
     global models_devices
     if "coarse" not in models:
         preload_models()
@@ -737,6 +765,7 @@ def generate_fine(
     n_coarse = x_coarse_gen.shape[0]
     # load models if not yet exist
     global models
+    print(f'Current fine model : {models["Name"]}')
     global models_devices
     if "fine" not in models:
         preload_models()
@@ -823,6 +852,7 @@ def codec_decode(fine_tokens):
     """Turn quantized audio codes into audio array using encodec."""
     # load models if not yet exist
     global models
+    print(f'Current code model : {models["Name"]}')
     global models_devices
     if "codec" not in models:
         preload_models()
